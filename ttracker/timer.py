@@ -2,8 +2,6 @@ import re
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
-from . import db
-
 
 def parse_duration(duration_str: str) -> int:
     """
@@ -92,87 +90,6 @@ def format_money(amount: float) -> str:
     return f"¥{amount:.2f}"
 
 
-def start_timer(project_name: str) -> Tuple[bool, str, Optional[object], Optional[Tuple[int, int]]]:
-    """
-    开始计时。如果已有正在进行的计时，先自动停止。
-    返回: (是否成功, 消息, 新项目对象, (被停止的记录ID, 时长秒数) 或 None)
-    """
-    project = db.get_project_by_name(project_name)
-    if not project:
-        return False, f"项目 '{project_name}' 不存在", None, None
-
-    now = datetime.now()
-    stopped_info = None
-
-    active = db.get_active_entry()
-    if active:
-        if active.project_id == project.id:
-            return False, f"项目 '{project_name}' 已经在计时中", project, None
-
-        old_start = active.start_time
-        duration = int((now - old_start).total_seconds())
-        db.stop_active_entry(active.id, now, duration)
-        stopped_info = (active.id, duration)
-
-    db.start_active_entry(project.id, now)
-    return True, f"开始计时项目 '{project_name}'", project, stopped_info
-
-
-def stop_timer(note: str = "") -> Tuple[bool, str, Optional[object], Optional[int]]:
-    """
-    停止计时。
-    返回: (是否成功, 消息, 项目对象, 时长秒数)
-    """
-    active = db.get_active_entry()
-    if not active:
-        return False, "当前没有正在进行的计时", None, None
-
-    now = datetime.now()
-    duration = int((now - active.start_time).total_seconds())
-    db.stop_active_entry(active.id, now, duration, note)
-
-    project = db.get_project_by_id(active.project_id)
-    return True, "计时已停止", project, duration
-
-
-def get_timer_status() -> Tuple[bool, str, Optional[object], Optional[int], Optional[datetime]]:
-    """
-    获取当前计时状态。
-    返回: (是否正在计时, 消息, 项目对象, 已计时秒数, 开始时间)
-    """
-    active = db.get_active_entry()
-    if not active:
-        return False, "当前没有正在进行的计时", None, None, None
-
-    now = datetime.now()
-    duration = int((now - active.start_time).total_seconds())
-    project = db.get_project_by_id(active.project_id)
-    return True, "计时中", project, duration, active.start_time
-
-
-def manual_log(project_name: str, duration_str: str, note: str = "",
-               start_time: Optional[datetime] = None) -> Tuple[bool, str, Optional[object], Optional[int]]:
-    """
-    手动补录时长。
-    返回: (是否成功, 消息, 项目对象, 时长秒数)
-    """
-    project = db.get_project_by_name(project_name)
-    if not project:
-        return False, f"项目 '{project_name}' 不存在", None, None
-
-    try:
-        duration = parse_duration(duration_str)
-    except ValueError as e:
-        return False, str(e), None, None
-
-    now = start_time or datetime.now()
-    end_time = now
-    start = now - timedelta(seconds=duration)
-
-    db.add_time_entry(project.id, start, end_time, duration, note)
-    return True, "已补录时长", project, duration
-
-
 def merge_overlapping_intervals(entries) -> int:
     """
     合并一组时间段，去除重叠/包含的部分，返回实际覆盖的总秒数。
@@ -201,3 +118,24 @@ def merge_overlapping_intervals(entries) -> int:
     for start, end in merged:
         total += int((end - start).total_seconds())
     return total if total > 0 else 0
+
+
+def start_timer(project_name: str) -> Tuple[bool, str, Optional[object], Optional[Tuple[int, int]]]:
+    from .services import TimerService
+    return TimerService().start_timer(project_name)
+
+
+def stop_timer(note: str = "") -> Tuple[bool, str, Optional[object], Optional[int]]:
+    from .services import TimerService
+    return TimerService().stop_timer(note)
+
+
+def get_timer_status() -> Tuple[bool, str, Optional[object], Optional[int], Optional[datetime]]:
+    from .services import TimerService
+    return TimerService().get_timer_status()
+
+
+def manual_log(project_name: str, duration_str: str, note: str = "",
+               start_time: Optional[datetime] = None) -> Tuple[bool, str, Optional[object], Optional[int]]:
+    from .services import TimerService
+    return TimerService().manual_log(project_name, duration_str, note, start_time)

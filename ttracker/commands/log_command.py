@@ -62,6 +62,12 @@ class LogCommand:
                 starts_with_digit and (project_name or len(args) >= 2)
             )
 
+            if project_name and len(args) >= 1:
+                duration_str = first_arg
+                note = " ".join(args[1:]) if len(args) > 1 else ""
+                self._do_manual_log(duration_str, note, project_name)
+                return
+
             if strongly_looks_like_manual_log:
                 duration_str = first_arg
                 note = " ".join(args[1:]) if len(args) > 1 else ""

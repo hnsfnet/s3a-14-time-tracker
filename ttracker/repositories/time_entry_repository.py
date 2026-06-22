@@ -52,9 +52,10 @@ class TimeEntryRepository:
                 "UPDATE time_entries SET end_time = ?, duration = ?, note = ? WHERE id = ?",
                 (end_time.isoformat(), duration, note, entry_id),
             )
+            entry_updated = cur.rowcount > 0
             cur.execute("UPDATE timer_state SET is_active = 0, active_entry_id = NULL WHERE id = 1")
             conn.commit()
-            return cur.rowcount > 0
+            return entry_updated
         finally:
             conn.close()
 

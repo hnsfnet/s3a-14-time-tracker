@@ -132,6 +132,9 @@ def delete_project(project_id: int) -> bool:
     conn = get_connection()
     try:
         cur = conn.cursor()
+        cur.execute("DELETE FROM time_entries WHERE project_id = ?", (project_id,))
+        cur.execute("DELETE FROM project_tags WHERE project_id = ?", (project_id,))
+        cur.execute("DELETE FROM budgets WHERE project_id = ?", (project_id,))
         cur.execute("DELETE FROM projects WHERE id = ?", (project_id,))
         conn.commit()
         return cur.rowcount > 0
@@ -342,14 +345,14 @@ def get_time_entries(start_date: Optional[datetime] = None,
 def get_entries_by_project(start_date: Optional[datetime] = None,
                            end_date: Optional[datetime] = None,
                            tag_name: Optional[str] = None) -> List[Tuple[Project, int, float]]:
+    from .timer import merge_overlapping_intervals
     conn = get_connection()
     try:
         cur = conn.cursor()
         query = """
-            SELECT p.id, p.name, p.description, p.client, p.rate,
-                   SUM(te.duration) as total_duration
+            SELECT DISTINCT p.id, p.name, p.description, p.client, p.rate
             FROM projects p
-            LEFT JOIN time_entries te ON p.id = te.project_id
+            INNER JOIN time_entries te ON p.id = te.project_id
             WHERE te.end_time IS NOT NULL
         """
         params = []
@@ -368,16 +371,37 @@ def get_entries_by_project(start_date: Optional[datetime] = None,
                 )
             """
             params.append(tag_name)
-        query += " GROUP BY p.id, p.name, p.description, p.client, p.rate ORDER BY total_duration DESC"
+        query += " ORDER BY p.id"
         cur.execute(query, params)
         rows = cur.fetchall()
+
         results = []
         for row in rows:
-            project = Project(row[0], row[1], row[2] or "", row[3] or "", row[4] or 0.0)
+            pid = row[0]
+            project = Project(pid, row[1], row[2] or "", row[3] or "", row[4] or 0.0)
             _attach_tags_and_budget(project, conn)
-            duration = row[5] or 0
-            cost = (duration / 3600.0) * project.rate
-            results.append((project, duration, cost))
+
+            eq = """
+                SELECT id, project_id, start_time, end_time, duration, note, NULL
+                FROM time_entries
+                WHERE project_id = ? AND end_time IS NOT NULL
+            """
+            eparams = [pid]
+            if start_date:
+                eq += " AND start_time >= ?"
+                eparams.append(start_date.isoformat())
+            if end_date:
+                eq += " AND start_time < ?"
+                eparams.append(end_date.isoformat())
+            from .models import TimeEntry
+            cur.execute(eq, eparams)
+            erows = cur.fetchall()
+            entries = [TimeEntry.from_row(r) for r in erows]
+            merged_duration = merge_overlapping_intervals(entries)
+            cost = (merged_duration / 3600.0) * project.rate
+            results.append((project, merged_duration, cost))
+
+        results.sort(key=lambda x: x[1], reverse=True)
         return results
     finally:
         conn.close()
@@ -525,15 +549,19 @@ def get_project_budget(project_id: int) -> Tuple[Optional[float], Optional[float
 
 
 def get_project_total_usage(project_id: int) -> Tuple[int, float]:
+    from .timer import merge_overlapping_intervals
+    from .models import TimeEntry
     conn = get_connection()
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT COALESCE(SUM(duration), 0) as total_duration FROM time_entries WHERE project_id = ? AND end_time IS NOT NULL",
+            "SELECT id, project_id, start_time, end_time, duration, note, NULL "
+            "FROM time_entries WHERE project_id = ? AND end_time IS NOT NULL",
             (project_id,),
         )
-        row = cur.fetchone()
-        total_seconds = row["total_duration"] or 0
+        rows = cur.fetchall()
+        entries = [TimeEntry.from_row(r) for r in rows]
+        total_seconds = merge_overlapping_intervals(entries)
         project = get_project_by_id(project_id)
         rate = project.rate if project else 0.0
         total_cost = (total_seconds / 3600.0) * rate

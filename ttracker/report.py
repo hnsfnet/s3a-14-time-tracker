@@ -13,7 +13,7 @@ from rich.text import Text
 
 from . import db
 from .models import Project, TimeEntry
-from .timer import format_duration, format_duration_short, format_money
+from .timer import format_duration, format_duration_short, format_money, merge_overlapping_intervals
 
 
 console = Console()
@@ -116,8 +116,9 @@ def print_log_entries(period: str = "today", month: Optional[str] = None,
     table.add_column("项目", style="magenta")
     table.add_column("备注", style="white")
 
-    total_duration = 0
+    total_duration = merge_overlapping_intervals(entries)
     total_cost = 0.0
+    unique_projects = set()
 
     for entry in entries:
         start_str = entry.start_time.strftime("%Y-%m-%d %H:%M")
@@ -125,9 +126,8 @@ def print_log_entries(period: str = "today", month: Optional[str] = None,
         project_display = entry.project_name or f"#{entry.project_id}"
 
         project = db.get_project_by_id(entry.project_id)
-        if project:
-            cost = (entry.duration / 3600.0) * project.rate
-            total_cost += cost
+        if project and project.id not in unique_projects:
+            unique_projects.add(project.id)
 
         table.add_row(
             start_str,
@@ -136,7 +136,14 @@ def print_log_entries(period: str = "today", month: Optional[str] = None,
             project_display,
             entry.note or "-",
         )
-        total_duration += entry.duration
+
+    for pid in unique_projects:
+        project = db.get_project_by_id(pid)
+        if not project:
+            continue
+        p_entries = [e for e in entries if e.project_id == pid]
+        p_duration = merge_overlapping_intervals(p_entries)
+        total_cost += (p_duration / 3600.0) * project.rate
 
     console.print(table)
 
@@ -298,7 +305,7 @@ def print_daily_report() -> None:
 
     for proj_name, items in sorted(by_project.items(),
                                    key=lambda x: sum(e.duration for e in x[1]), reverse=True):
-        proj_total = sum(e.duration for e in items)
+        proj_total = merge_overlapping_intervals(items)
         project = db.get_project_by_name(proj_name)
         proj_cost = (proj_total / 3600.0) * (project.rate if project else 0)
 
@@ -362,7 +369,10 @@ def print_weekly_report() -> None:
 
     for day_key in sorted(by_day.keys()):
         projects = by_day[day_key]
-        day_total = sum(sum(e.duration for e in items) for items in projects.values())
+        day_entries_all = []
+        for items in projects.values():
+            day_entries_all.extend(items)
+        day_total = merge_overlapping_intervals(day_entries_all)
         week_total_duration += day_total
 
         day_title = f"[cyan]{day_key}[/cyan] - [green]{format_duration(day_total)}[/green]"
@@ -374,7 +384,7 @@ def print_weekly_report() -> None:
         day_cost = 0.0
         for proj_name, items in sorted(projects.items(),
                                        key=lambda x: sum(e.duration for e in x[1]), reverse=True):
-            proj_total = sum(e.duration for e in items)
+            proj_total = merge_overlapping_intervals(items)
             notes = [e.note for e in items if e.note]
             notes_str = "; ".join(notes) if notes else "(无备注)"
             project = db.get_project_by_name(proj_name)
@@ -438,8 +448,16 @@ def export_csv(period: str = "all", month: Optional[str] = None,
                 "项目ID", "项目名称", "客户名称", "小时费率", "费用", "备注", "标签"
             ])
 
-            total_duration = 0
+            total_duration = merge_overlapping_intervals(entries)
+            unique_projects_in_csv = set(e.project_id for e in entries)
             total_cost = 0.0
+            for pid in unique_projects_in_csv:
+                project = db.get_project_by_id(pid)
+                if not project:
+                    continue
+                p_entries = [e for e in entries if e.project_id == pid]
+                p_dur = merge_overlapping_intervals(p_entries)
+                total_cost += (p_dur / 3600.0) * project.rate
 
             for entry in entries:
                 project = db.get_project_by_id(entry.project_id)
@@ -463,11 +481,9 @@ def export_csv(period: str = "all", month: Optional[str] = None,
                     entry.note or "",
                     tags,
                 ])
-                total_duration += entry.duration
-                total_cost += cost
 
             writer.writerow([])
-            writer.writerow(["", "", "合计", round(total_duration / 3600.0, 4),
+            writer.writerow(["", "", "去重合计", round(total_duration / 3600.0, 4),
                              "", "", "", "", round(total_cost, 2), "", ""])
 
         return output_path
@@ -521,7 +537,7 @@ def export_markdown(period: str = "week", month: Optional[str] = None,
 
     for proj_name, items in sorted(by_project.items(),
                                    key=lambda x: sum(e.duration for e in x[1]), reverse=True):
-        proj_total = sum(e.duration for e in items)
+        proj_total = merge_overlapping_intervals(items)
         project = db.get_project_by_name(proj_name)
         proj_cost = (proj_total / 3600.0) * (project.rate if project else 0)
         total_duration += proj_total

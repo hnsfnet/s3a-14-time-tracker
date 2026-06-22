@@ -67,13 +67,21 @@ class TimeEntry:
 
     @classmethod
     def from_row(cls, row):
+        start_time = datetime.fromisoformat(row[2])
         end_time = datetime.fromisoformat(row[3]) if row[3] else None
+        stored_duration = row[4] or 0
+        if end_time and start_time:
+            calc_duration = int((end_time - start_time).total_seconds())
+            if calc_duration > 0 and abs(calc_duration - stored_duration) > 1:
+                stored_duration = calc_duration
+        if stored_duration < 0:
+            stored_duration = 0
         return cls(
             id=row[0],
             project_id=row[1],
-            start_time=datetime.fromisoformat(row[2]),
+            start_time=start_time,
             end_time=end_time,
-            duration=row[4] or 0,
+            duration=stored_duration,
             note=row[5] or "",
             project_name=row[6] if len(row) > 6 else None,
         )

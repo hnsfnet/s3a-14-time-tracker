@@ -1,4 +1,5 @@
 import sys
+import re
 from typing import Optional, List
 
 import click
@@ -419,19 +420,35 @@ def cmd_log(args, period, month_val, project_name, tag_name):
     手动补录 (指定项目):
       tt log 2h30m "写接口文档" --project "官网改版"
     """
-
     if len(args) >= 1 and not period and not month_val and not tag_name:
-        try:
-            timer.parse_duration(args[0])
-            is_duration = True
-        except ValueError:
-            is_duration = False
+        first_arg = args[0]
+        first_arg_stripped = first_arg.strip()
+        starts_with_digit = bool(first_arg_stripped) and first_arg_stripped[0].isdigit()
 
-        if is_duration:
-            duration_str = args[0]
+        looks_like_duration = (
+            starts_with_digit and
+            (first_arg_stripped[-1].lower() in ('h', 'm', 's') or
+             bool(re.search(r'\d+[hms]', first_arg_stripped.lower())))
+        )
+
+        strongly_looks_like_manual_log = looks_like_duration or (
+            starts_with_digit and (project_name or len(args) >= 2)
+        )
+
+        if strongly_looks_like_manual_log:
+            duration_str = first_arg
             note = " ".join(args[1:]) if len(args) > 1 else ""
             _do_manual_log(duration_str, note, project_name)
             return
+        else:
+            try:
+                timer.parse_duration(first_arg)
+                duration_str = first_arg
+                note = " ".join(args[1:]) if len(args) > 1 else ""
+                _do_manual_log(duration_str, note, project_name)
+                return
+            except ValueError:
+                pass
 
     if month_val:
         report.print_log_entries("month", month_val, project_name, tag_name)

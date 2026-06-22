@@ -1,10 +1,10 @@
 import os
 import sqlite3
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 from datetime import datetime, timedelta
 
-from .models import Project, TimeEntry
+from .models import Project, TimeEntry, Tag, Budget
 
 
 def get_db_path() -> Path:
@@ -17,6 +17,7 @@ def get_db_path() -> Path:
 def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(str(get_db_path()))
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
@@ -44,6 +45,36 @@ def init_db() -> None:
                 end_time TEXT,
                 duration INTEGER NOT NULL DEFAULT 0,
                 note TEXT,
+                FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS project_tags (
+                project_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                PRIMARY KEY (project_id, tag_id),
+                FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
+                FOREIGN KEY (tag_id) REFERENCES tags (id) ON DELETE CASCADE
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS budgets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL UNIQUE,
+                hours_limit REAL,
+                cost_limit REAL,
                 FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE
             )
             """
@@ -108,13 +139,38 @@ def delete_project(project_id: int) -> bool:
         conn.close()
 
 
+def _attach_tags_and_budget(project: Project, conn: sqlite3.Connection) -> Project:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT t.name FROM tags t
+        INNER JOIN project_tags pt ON t.id = pt.tag_id
+        WHERE pt.project_id = ?
+        ORDER BY t.name
+        """,
+        (project.id,),
+    )
+    project.tags = [row["name"] for row in cur.fetchall()]
+
+    cur.execute("SELECT hours_limit, cost_limit FROM budgets WHERE project_id = ?",
+                (project.id,))
+    row = cur.fetchone()
+    if row:
+        project.budget_hours = row["hours_limit"]
+        project.budget_cost = row["cost_limit"]
+    return project
+
+
 def get_all_projects() -> List[Project]:
     conn = get_connection()
     try:
         cur = conn.cursor()
         cur.execute("SELECT id, name, description, client, rate FROM projects ORDER BY id")
         rows = cur.fetchall()
-        return [Project.from_row(row) for row in rows]
+        projects = [Project.from_row(row) for row in rows]
+        for p in projects:
+            _attach_tags_and_budget(p, conn)
+        return projects
     finally:
         conn.close()
 
@@ -126,7 +182,11 @@ def get_project_by_id(project_id: int) -> Optional[Project]:
         cur.execute("SELECT id, name, description, client, rate FROM projects WHERE id = ?",
                     (project_id,))
         row = cur.fetchone()
-        return Project.from_row(row) if row else None
+        if not row:
+            return None
+        project = Project.from_row(row)
+        _attach_tags_and_budget(project, conn)
+        return project
     finally:
         conn.close()
 
@@ -138,7 +198,11 @@ def get_project_by_name(name: str) -> Optional[Project]:
         cur.execute("SELECT id, name, description, client, rate FROM projects WHERE name = ?",
                     (name,))
         row = cur.fetchone()
-        return Project.from_row(row) if row else None
+        if not row:
+            return None
+        project = Project.from_row(row)
+        _attach_tags_and_budget(project, conn)
+        return project
     finally:
         conn.close()
 
@@ -234,7 +298,8 @@ def stop_all_active_entries(end_time: datetime) -> List[Tuple[int, int]]:
 def get_time_entries(start_date: Optional[datetime] = None,
                      end_date: Optional[datetime] = None,
                      project_id: Optional[int] = None,
-                     project_name: Optional[str] = None) -> List[TimeEntry]:
+                     project_name: Optional[str] = None,
+                     tag_name: Optional[str] = None) -> List[TimeEntry]:
     conn = get_connection()
     try:
         cur = conn.cursor()
@@ -257,6 +322,15 @@ def get_time_entries(start_date: Optional[datetime] = None,
         if project_name:
             query += " AND p.name = ?"
             params.append(project_name)
+        if tag_name:
+            query += """
+                AND te.project_id IN (
+                    SELECT pt.project_id FROM project_tags pt
+                    INNER JOIN tags t ON pt.tag_id = t.id
+                    WHERE t.name = ?
+                )
+            """
+            params.append(tag_name)
         query += " ORDER BY te.start_time ASC"
         cur.execute(query, params)
         rows = cur.fetchall()
@@ -266,7 +340,8 @@ def get_time_entries(start_date: Optional[datetime] = None,
 
 
 def get_entries_by_project(start_date: Optional[datetime] = None,
-                           end_date: Optional[datetime] = None) -> List[Tuple[Project, int, float]]:
+                           end_date: Optional[datetime] = None,
+                           tag_name: Optional[str] = None) -> List[Tuple[Project, int, float]]:
     conn = get_connection()
     try:
         cur = conn.cursor()
@@ -284,15 +359,184 @@ def get_entries_by_project(start_date: Optional[datetime] = None,
         if end_date:
             query += " AND te.start_time < ?"
             params.append(end_date.isoformat())
+        if tag_name:
+            query += """
+                AND p.id IN (
+                    SELECT pt.project_id FROM project_tags pt
+                    INNER JOIN tags t ON pt.tag_id = t.id
+                    WHERE t.name = ?
+                )
+            """
+            params.append(tag_name)
         query += " GROUP BY p.id, p.name, p.description, p.client, p.rate ORDER BY total_duration DESC"
         cur.execute(query, params)
         rows = cur.fetchall()
         results = []
         for row in rows:
             project = Project(row[0], row[1], row[2] or "", row[3] or "", row[4] or 0.0)
+            _attach_tags_and_budget(project, conn)
             duration = row[5] or 0
             cost = (duration / 3600.0) * project.rate
             results.append((project, duration, cost))
         return results
+    finally:
+        conn.close()
+
+
+# ─── 标签相关 ────────────────────────────────────────────────────
+
+def get_or_create_tag(name: str) -> int:
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM tags WHERE name = ?", (name,))
+        row = cur.fetchone()
+        if row:
+            return row["id"]
+        cur.execute("INSERT INTO tags (name) VALUES (?)", (name,))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def add_tag_to_project(project_id: int, tag_name: str) -> bool:
+    tag_id = get_or_create_tag(tag_name)
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "INSERT INTO project_tags (project_id, tag_id) VALUES (?, ?)",
+                (project_id, tag_id),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+    finally:
+        conn.close()
+
+
+def remove_tag_from_project(project_id: int, tag_name: str) -> bool:
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM tags WHERE name = ?", (tag_name,))
+        row = cur.fetchone()
+        if not row:
+            return False
+        cur.execute(
+            "DELETE FROM project_tags WHERE project_id = ? AND tag_id = ?",
+            (project_id, row["id"]),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def get_project_tags(project_id: int) -> List[str]:
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT t.name FROM tags t
+            INNER JOIN project_tags pt ON t.id = pt.tag_id
+            WHERE pt.project_id = ?
+            ORDER BY t.name
+            """,
+            (project_id,),
+        )
+        return [row["name"] for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_all_tags() -> List[str]:
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM tags ORDER BY name")
+        return [row["name"] for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+# ─── 预算相关 ────────────────────────────────────────────────────
+
+def set_budget_hours(project_id: int, hours_limit: Optional[float]) -> bool:
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM budgets WHERE project_id = ?", (project_id,))
+        row = cur.fetchone()
+        if row:
+            cur.execute(
+                "UPDATE budgets SET hours_limit = ? WHERE project_id = ?",
+                (hours_limit, project_id),
+            )
+        else:
+            cur.execute(
+                "INSERT INTO budgets (project_id, hours_limit, cost_limit) VALUES (?, ?, NULL)",
+                (project_id, hours_limit),
+            )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def set_budget_cost(project_id: int, cost_limit: Optional[float]) -> bool:
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM budgets WHERE project_id = ?", (project_id,))
+        row = cur.fetchone()
+        if row:
+            cur.execute(
+                "UPDATE budgets SET cost_limit = ? WHERE project_id = ?",
+                (cost_limit, project_id),
+            )
+        else:
+            cur.execute(
+                "INSERT INTO budgets (project_id, hours_limit, cost_limit) VALUES (?, NULL, ?)",
+                (project_id, cost_limit),
+            )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def get_project_budget(project_id: int) -> Tuple[Optional[float], Optional[float]]:
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT hours_limit, cost_limit FROM budgets WHERE project_id = ?",
+                    (project_id,))
+        row = cur.fetchone()
+        if row:
+            return row["hours_limit"], row["cost_limit"]
+        return None, None
+    finally:
+        conn.close()
+
+
+def get_project_total_usage(project_id: int) -> Tuple[int, float]:
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COALESCE(SUM(duration), 0) as total_duration FROM time_entries WHERE project_id = ? AND end_time IS NOT NULL",
+            (project_id,),
+        )
+        row = cur.fetchone()
+        total_seconds = row["total_duration"] or 0
+        project = get_project_by_id(project_id)
+        rate = project.rate if project else 0.0
+        total_cost = (total_seconds / 3600.0) * rate
+        return total_seconds, total_cost
     finally:
         conn.close()

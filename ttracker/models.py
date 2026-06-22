@@ -1,6 +1,36 @@
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, List
 from datetime import datetime
+
+
+@dataclass
+class Tag:
+    id: Optional[int]
+    name: str
+
+    @classmethod
+    def from_row(cls, row):
+        return cls(
+            id=row[0],
+            name=row[1],
+        )
+
+
+@dataclass
+class Budget:
+    id: Optional[int]
+    project_id: int
+    budget_type: str  # 'hours' or 'cost'
+    limit: float
+
+    @classmethod
+    def from_row(cls, row):
+        return cls(
+            id=row[0],
+            project_id=row[1],
+            budget_type=row[2],
+            limit=row[3],
+        )
 
 
 @dataclass
@@ -10,6 +40,9 @@ class Project:
     description: str
     client: str
     rate: float
+    tags: List[str] = field(default_factory=list)
+    budget_hours: Optional[float] = None
+    budget_cost: Optional[float] = None
 
     @classmethod
     def from_row(cls, row):
